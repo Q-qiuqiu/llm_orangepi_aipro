@@ -12,7 +12,6 @@
 #include "device.hpp"
 #include "llama2_layer_cpu.hpp"
 #include "llama2_layer_npu.hpp"
-#include "llama2_model.hpp"
 #include "model_base.hpp"
 #include "qwen2_model.hpp"
 #include "util.h"
@@ -220,16 +219,10 @@ bool RMSNormLayer::Init(ModelBase *model, const std::string &weight_path) {
 void RMSNormLayer::UnInit() {}
 
 bool Llamma2TransformerLayerImpl::Init(ModelBase *model, int layer_no) {
-  Llama2Model *llama2_model = dynamic_cast<Llama2Model *>(model);
-  if (llama2_model == nullptr) {
-    return false;
-  }
   hidden_dim = model->hidden_dim;
   head_dim = model->hidden_dim / model->n_heads;
   n_heads = model->n_heads;
   ffn_hidden = 4 * ((hidden_dim * 2) / 3);
-  ffn_hidden = (ffn_hidden + llama2_model->multiple_of - 1) /
-               llama2_model->multiple_of * llama2_model->multiple_of;
   max_seq_len = model->config.max_seq_len;
   return true;
 }

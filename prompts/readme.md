@@ -1,1 +1,0 @@
-chat_example.txt from llama.cpp

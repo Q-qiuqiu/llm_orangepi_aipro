@@ -41,7 +41,6 @@ set(COMMON_SOURCE_FILES
         device_npu.cpp
         llama2_layer_cpu.cpp
         llama2_layer_npu.cpp
-        llama2_model.cpp
         model_base.cpp
         profiling.cpp
         qwen2_model.cpp

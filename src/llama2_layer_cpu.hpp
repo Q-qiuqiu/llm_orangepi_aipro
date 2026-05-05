@@ -1,6 +1,6 @@
 #pragma once
 
-#include "llama2_model.hpp"
+#include "model_base.hpp"
 
 class EmbeddingLayerCPUImpl : public EmbeddingLayerImpl {
 public:
