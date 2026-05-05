@@ -52,6 +52,12 @@ struct GenerationResult {
   double decode_tps{0.0};
 };
 
+class ClientDisconnected : public std::runtime_error {
+public:
+  explicit ClientDisconnected(const std::string &message)
+      : std::runtime_error(message) {}
+};
+
 class CaptureStreamer : public BaseStreamer {
 public:
   explicit CaptureStreamer(Qwen2HFTokenizer *tokenizer)
@@ -178,7 +184,12 @@ public:
 private:
   void write_sse_data(const std::string &payload) {
     std::string frame = "data: " + payload + "\n\n";
-    asio::write(socket_, asio::buffer(frame));
+    beast::error_code ec;
+    asio::write(socket_, asio::buffer(frame), ec);
+    if (ec) {
+      disconnected_ = true;
+      throw ClientDisconnected(ec.message());
+    }
   }
 
   void send_chat_delta(const std::string &content, const std::string &role,
@@ -228,6 +239,7 @@ private:
   std::vector<int> token_cache_;
   int print_len_{0};
   std::string full_text_;
+  bool disconnected_{false};
 };
 
 static std::string json_content_to_text(const json &content) {
@@ -581,7 +593,11 @@ static void write_sse_header(tcp::socket &socket) {
       "Cache-Control: no-cache\r\n"
       "Connection: close\r\n"
       "\r\n";
-  asio::write(socket, asio::buffer(header));
+  beast::error_code ec;
+  asio::write(socket, asio::buffer(header), ec);
+  if (ec) {
+    throw ClientDisconnected(ec.message());
+  }
 }
 
 static bool is_streaming_request(
@@ -638,17 +654,22 @@ static void handle_streaming_request(
 
   SseStreamer sse(socket, &model->qwen_tokenizer, opts.served_model_name,
                   is_chat);
-  GenerationResult gen =
-      generate_text_stream(model, prompt, max_tokens, temperature, top_p, &sse);
-  sse.send_finish();
-  gen.text = sse.full_text();
+  try {
+    GenerationResult gen = generate_text_stream(
+        model, prompt, max_tokens, temperature, top_p, &sse);
+    sse.send_finish();
+    gen.text = sse.full_text();
 
-  spdlog::info("model response: {}", gen.text);
-  spdlog::info("inference speed: total_tps {:.2f}, decode_tps {:.2f}, "
-               "ttft {:.3f}s, decode {:.3f}s, output tokens: {}, elapsed: "
-               "{:.3f}s",
-               gen.tps, gen.decode_tps, gen.ttft_seconds, gen.decode_seconds,
-               gen.completion_tokens, gen.elapsed_seconds);
+    spdlog::info("model response: {}", gen.text);
+    spdlog::info("inference speed: total_tps {:.2f}, decode_tps {:.2f}, "
+                 "ttft {:.3f}s, decode {:.3f}s, output tokens: {}, elapsed: "
+                 "{:.3f}s",
+                 gen.tps, gen.decode_tps, gen.ttft_seconds,
+                 gen.decode_seconds, gen.completion_tokens,
+                 gen.elapsed_seconds);
+  } catch (const ClientDisconnected &e) {
+    spdlog::warn("stream client disconnected: {}", e.what());
+  }
 }
 
 static bool validate_path(const std::string &path, bool directory) {
@@ -767,19 +788,35 @@ int main(int argc, char **argv) {
     spdlog::info("model loaded, waiting for OpenAI HTTP requests");
 
     for (;;) {
-      tcp::socket socket{ioc};
-      acceptor.accept(socket);
-      beast::flat_buffer buffer;
-      http::request<http::string_body> req;
-      http::read(socket, buffer, req);
-      if (is_streaming_request(req)) {
-        handle_streaming_request(model.get(), server_opts, req, socket);
-      } else {
-        auto res = handle_request(model.get(), server_opts, req);
-        http::write(socket, res);
+      try {
+        tcp::socket socket{ioc};
+        acceptor.accept(socket);
+        beast::flat_buffer buffer;
+        http::request<http::string_body> req;
+
+        beast::error_code ec;
+        http::read(socket, buffer, req, ec);
+        if (ec) {
+          spdlog::warn("failed to read request: {}", ec.message());
+          continue;
+        }
+
+        if (is_streaming_request(req)) {
+          handle_streaming_request(model.get(), server_opts, req, socket);
+        } else {
+          auto res = handle_request(model.get(), server_opts, req);
+          http::write(socket, res, ec);
+          if (ec) {
+            spdlog::warn("failed to write response: {}", ec.message());
+          }
+        }
+
+        socket.shutdown(tcp::socket::shutdown_send, ec);
+      } catch (const ClientDisconnected &e) {
+        spdlog::warn("client disconnected: {}", e.what());
+      } catch (const std::exception &e) {
+        spdlog::error("connection handling failed: {}", e.what());
       }
-      beast::error_code ec;
-      socket.shutdown(tcp::socket::shutdown_send, ec);
     }
   } catch (const std::exception &e) {
     spdlog::critical("server failed: {}", e.what());
