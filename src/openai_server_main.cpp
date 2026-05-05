@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <csignal>
 #include <sstream>
 #include <spdlog/spdlog.h>
 #include <string>
@@ -35,6 +36,10 @@ static std::map<std::string, spdlog::level::level_enum> log_levels{
     {"info", spdlog::level::info},   {"warning", spdlog::level::warn},
     {"error", spdlog::level::err},   {"critical", spdlog::level::critical},
     {"off", spdlog::level::off}};
+
+static std::atomic_bool g_shutdown_requested{false};
+
+static void handle_signal(int) { g_shutdown_requested.store(true); }
 
 struct ServerOptions {
   std::string host{"0.0.0.0"};
@@ -790,6 +795,9 @@ static void handle_connection(tcp::socket socket, Qwen2Model *model,
 }
 
 int main(int argc, char **argv) {
+  std::signal(SIGINT, handle_signal);
+  std::signal(SIGTERM, handle_signal);
+
   Py_Initialize();
   PyImport_ImportModule("site");
 
@@ -899,17 +907,33 @@ int main(int argc, char **argv) {
     std::atomic_bool is_generating{false};
     PyEval_SaveThread();
 
-    for (;;) {
+    while (!g_shutdown_requested.load()) {
       try {
         tcp::socket socket{ioc};
-        acceptor.accept(socket);
+        beast::error_code ec;
+        acceptor.non_blocking(true, ec);
+        acceptor.accept(socket, ec);
+        if (ec == asio::error::would_block ||
+            ec == asio::error::try_again) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          continue;
+        }
+        if (ec) {
+          if (!g_shutdown_requested.load()) {
+            spdlog::error("accept failed: {}", ec.message());
+          }
+          continue;
+        }
         std::thread(handle_connection, std::move(socket), model.get(),
                     server_opts, &is_generating)
             .detach();
       } catch (const std::exception &e) {
-        spdlog::error("accept failed: {}", e.what());
+        if (!g_shutdown_requested.load()) {
+          spdlog::error("accept failed: {}", e.what());
+        }
       }
     }
+    spdlog::info("shutdown requested, exiting server");
   } catch (const std::exception &e) {
     spdlog::critical("server failed: {}", e.what());
     Py_Finalize();
