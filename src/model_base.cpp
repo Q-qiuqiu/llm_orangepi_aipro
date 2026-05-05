@@ -351,12 +351,21 @@ bool SampleTopPLayerImpl::Init(ModelBase *model) {
   return true;
 }
 
+void SampleTopPLayerImpl::SetParams(float new_temperature, float new_top_p) {
+  temperature = new_temperature;
+  top_p = new_top_p;
+}
+
 void SampleTopPLayerImpl::UnInit() {}
 
 SampleTopPLayer::~SampleTopPLayer() {}
 
 int SampleTopPLayer::Forward(std::shared_ptr<Tensor> input, InferenceCtx &ctx) {
   return impl->Forward(input, ctx);
+}
+
+void SampleTopPLayer::SetParams(float temperature, float top_p) {
+  impl->SetParams(temperature, top_p);
 }
 
 bool SampleTopPLayer::Init(ModelBase *model) {

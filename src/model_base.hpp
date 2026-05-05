@@ -159,6 +159,7 @@ public:
   virtual ~SampleTopPLayerImpl();
   virtual int Forward(std::shared_ptr<Tensor> input, InferenceCtx &ctx) = 0;
   virtual bool Init(ModelBase *model);
+  void SetParams(float temperature, float top_p);
   virtual void UnInit();
 
   float temperature;
@@ -171,6 +172,7 @@ public:
   ~SampleTopPLayer();
   virtual int Forward(std::shared_ptr<Tensor> input, InferenceCtx &ctx);
   bool Init(ModelBase *model);
+  void SetParams(float temperature, float top_p);
   void UnInit();
   SampleTopPLayerImpl *impl{nullptr};
 };

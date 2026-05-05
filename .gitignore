@@ -5,6 +5,7 @@ test_tiny_orangepi.sh
 *.bin
 *.json
 build/
+build_server/
 model_output/
 profiling_output/
 

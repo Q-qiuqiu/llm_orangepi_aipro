@@ -34,10 +34,23 @@ message("using python lib: ${Python_LIBRARY_DIRS}")
 
 find_package (Eigen3 REQUIRED NO_MODULE)
 
-file(GLOB SOURCE_FILES *.cpp)
+set(COMMON_SOURCE_FILES
+        device.cpp
+        device_cpu.cpp
+        device_gpu.cpp
+        device_npu.cpp
+        llama2_layer_cpu.cpp
+        llama2_layer_npu.cpp
+        llama2_model.cpp
+        model_base.cpp
+        profiling.cpp
+        qwen2_model.cpp
+        tokenizer.cpp
+        util.cpp
+)
 
-add_executable(llama2_main ${SOURCE_FILES})
+add_executable(qwen_openai_server openai_server_main.cpp ${COMMON_SOURCE_FILES})
 message("${EIGEN3_INCLUDE_DIR}")
-target_include_directories(llama2_main PUBLIC ${EIGEN3_INCLUDE_DIR} ${ACL_PATH}/include ../prebuild ${Python_INCLUDE_DIRS})
-target_link_directories(llama2_main PUBLIC ${ACL_PATH}/lib64 ../prebuild ${Python_LIBRARY_DIRS})
-target_link_libraries(llama2_main sentencepiece boost_program_options boost_system boost_filesystem fmt ascendcl runtime npu_ops re2 ${Python_LIBRARIES})
+target_include_directories(qwen_openai_server PUBLIC ${EIGEN3_INCLUDE_DIR} ${ACL_PATH}/include ../prebuild ${Python_INCLUDE_DIRS})
+target_link_directories(qwen_openai_server PUBLIC ${ACL_PATH}/lib64 ../prebuild ${Python_LIBRARY_DIRS})
+target_link_libraries(qwen_openai_server sentencepiece boost_program_options boost_system boost_filesystem fmt ascendcl runtime npu_ops re2 ${Python_LIBRARIES})
