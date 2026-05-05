@@ -349,6 +349,7 @@ public:
   int pad_id;
 
   aclrtStream model_stream;
+  aclrtContext model_context{nullptr};
 
   float *freq_cis{nullptr};
   bool is_profiling{false};

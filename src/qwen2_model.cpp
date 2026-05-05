@@ -113,6 +113,7 @@ bool Qwen2Model::Init() {
     int32_t deviceId = 0;
     CHECK_ACL(aclrtSetDevice(deviceId));
     CHECK_ACL(aclrtCreateContext(&context, deviceId));
+    model_context = context;
     CHECK_ACL(aclrtCreateStream(&model_stream));
   }
   std::ifstream config_fs(config.config_path.c_str());

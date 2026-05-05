@@ -756,6 +756,9 @@ static void handle_connection(tcp::socket socket, Qwen2Model *model,
       }
       gil_state = PyGILState_Ensure();
       has_gil = true;
+      if (model->model_context != nullptr) {
+        CHECK_ACL(aclrtSetCurrentContext(model->model_context));
+      }
     }
 
     try {
