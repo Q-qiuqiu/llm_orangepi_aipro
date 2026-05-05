@@ -1,5 +1,6 @@
 #include <Python.h>
 #include <algorithm>
+#include <atomic>
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -15,6 +16,7 @@
 #include <sstream>
 #include <spdlog/spdlog.h>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "acl_util.hpp"
@@ -326,6 +328,12 @@ static GenerationResult generate_text(Qwen2Model *model,
   int old_max_gen_len = model->config.max_gen_len;
   float old_temperature = model->config.temperature;
   float old_top_p = model->config.top_p;
+  auto restore_model_config = [&]() {
+    model->config.max_gen_len = old_max_gen_len;
+    model->config.temperature = old_temperature;
+    model->config.top_p = old_top_p;
+    model->top_p_layer.SetParams(old_temperature, old_top_p);
+  };
 
   model->config.temperature = temperature;
   model->config.top_p = top_p;
@@ -355,7 +363,13 @@ static GenerationResult generate_text(Qwen2Model *model,
 
   PerfStreamer perf;
   auto start = std::chrono::steady_clock::now();
-  std::vector<int> output_ids = model->Generate(input_ids, ctx, &perf);
+  std::vector<int> output_ids;
+  try {
+    output_ids = model->Generate(input_ids, ctx, &perf);
+  } catch (...) {
+    restore_model_config();
+    throw;
+  }
   auto end = std::chrono::steady_clock::now();
 
   GenerationResult result;
@@ -374,10 +388,7 @@ static GenerationResult generate_text(Qwen2Model *model,
                           : 0.0;
   result.text = decode_completion(model, output_ids, input_ids.size());
 
-  model->config.max_gen_len = old_max_gen_len;
-  model->config.temperature = old_temperature;
-  model->config.top_p = old_top_p;
-  model->top_p_layer.SetParams(old_temperature, old_top_p);
+  restore_model_config();
   return result;
 }
 
@@ -393,6 +404,12 @@ static GenerationResult generate_text_stream(Qwen2Model *model,
   int old_max_gen_len = model->config.max_gen_len;
   float old_temperature = model->config.temperature;
   float old_top_p = model->config.top_p;
+  auto restore_model_config = [&]() {
+    model->config.max_gen_len = old_max_gen_len;
+    model->config.temperature = old_temperature;
+    model->config.top_p = old_top_p;
+    model->top_p_layer.SetParams(old_temperature, old_top_p);
+  };
 
   model->config.temperature = temperature;
   model->config.top_p = top_p;
@@ -427,7 +444,13 @@ static GenerationResult generate_text_stream(Qwen2Model *model,
                                                          [](BaseStreamer *) {})});
 
   auto start = std::chrono::steady_clock::now();
-  std::vector<int> output_ids = model->Generate(input_ids, ctx, &streamers);
+  std::vector<int> output_ids;
+  try {
+    output_ids = model->Generate(input_ids, ctx, &streamers);
+  } catch (...) {
+    restore_model_config();
+    throw;
+  }
   auto end = std::chrono::steady_clock::now();
 
   GenerationResult result;
@@ -444,10 +467,7 @@ static GenerationResult generate_text_stream(Qwen2Model *model,
                           ? result.completion_tokens / result.decode_seconds
                           : 0.0;
 
-  model->config.max_gen_len = old_max_gen_len;
-  model->config.temperature = old_temperature;
-  model->config.top_p = old_top_p;
-  model->top_p_layer.SetParams(old_temperature, old_top_p);
+  restore_model_config();
   return result;
 }
 
@@ -493,6 +513,25 @@ json_response(http::status status, const json &body, unsigned version,
   res.body() = body.dump();
   res.prepare_payload();
   return res;
+}
+
+static http::response<http::string_body>
+server_busy_response(unsigned version, bool keep_alive) {
+  return json_response(
+      http::status::service_unavailable,
+      {{"error",
+        {{"message", "server busy, please wait"},
+         {"type", "server_busy"}}}},
+      version, keep_alive);
+}
+
+static bool is_generation_request(
+    const http::request<http::string_body> &req) {
+  if (req.method() != http::verb::post) {
+    return false;
+  }
+  std::string target(req.target());
+  return target == "/v1/chat/completions" || target == "/v1/completions";
 }
 
 static http::response<http::string_body>
@@ -680,6 +719,76 @@ static bool validate_path(const std::string &path, bool directory) {
                    : boost::filesystem::is_regular_file(path);
 }
 
+static void handle_connection(tcp::socket socket, Qwen2Model *model,
+                              const ServerOptions &server_opts,
+                              std::atomic_bool *is_generating) {
+  bool owns_generation = false;
+  bool has_gil = false;
+  PyGILState_STATE gil_state;
+
+  try {
+    beast::flat_buffer buffer;
+    http::request<http::string_body> req;
+
+    beast::error_code ec;
+    http::read(socket, buffer, req, ec);
+    if (ec) {
+      spdlog::warn("failed to read request: {}", ec.message());
+      return;
+    }
+
+    bool generation_request = is_generation_request(req);
+    if (generation_request) {
+      owns_generation = !is_generating->exchange(true);
+      if (!owns_generation) {
+        auto res = server_busy_response(req.version(), req.keep_alive());
+        http::write(socket, res, ec);
+        if (ec) {
+          spdlog::warn("failed to write busy response: {}", ec.message());
+        }
+        socket.shutdown(tcp::socket::shutdown_send, ec);
+        return;
+      }
+      gil_state = PyGILState_Ensure();
+      has_gil = true;
+    }
+
+    try {
+      if (is_streaming_request(req)) {
+        handle_streaming_request(model, server_opts, req, socket);
+      } else {
+        auto res = handle_request(model, server_opts, req);
+        http::write(socket, res, ec);
+        if (ec) {
+          spdlog::warn("failed to write response: {}", ec.message());
+        }
+      }
+    } catch (const ClientDisconnected &e) {
+      spdlog::warn("client disconnected: {}", e.what());
+    } catch (const std::exception &e) {
+      spdlog::error("connection handling failed: {}", e.what());
+    }
+
+    if (has_gil) {
+      PyGILState_Release(gil_state);
+      has_gil = false;
+    }
+    if (owns_generation) {
+      is_generating->store(false);
+      owns_generation = false;
+    }
+    socket.shutdown(tcp::socket::shutdown_send, ec);
+  } catch (const std::exception &e) {
+    spdlog::error("connection handling failed: {}", e.what());
+    if (has_gil) {
+      PyGILState_Release(gil_state);
+    }
+    if (owns_generation) {
+      is_generating->store(false);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   Py_Initialize();
   PyImport_ImportModule("site");
@@ -787,35 +896,18 @@ int main(int argc, char **argv) {
                  server_opts.host, server_opts.port);
     spdlog::info("model loaded, waiting for OpenAI HTTP requests");
 
+    std::atomic_bool is_generating{false};
+    PyEval_SaveThread();
+
     for (;;) {
       try {
         tcp::socket socket{ioc};
         acceptor.accept(socket);
-        beast::flat_buffer buffer;
-        http::request<http::string_body> req;
-
-        beast::error_code ec;
-        http::read(socket, buffer, req, ec);
-        if (ec) {
-          spdlog::warn("failed to read request: {}", ec.message());
-          continue;
-        }
-
-        if (is_streaming_request(req)) {
-          handle_streaming_request(model.get(), server_opts, req, socket);
-        } else {
-          auto res = handle_request(model.get(), server_opts, req);
-          http::write(socket, res, ec);
-          if (ec) {
-            spdlog::warn("failed to write response: {}", ec.message());
-          }
-        }
-
-        socket.shutdown(tcp::socket::shutdown_send, ec);
-      } catch (const ClientDisconnected &e) {
-        spdlog::warn("client disconnected: {}", e.what());
+        std::thread(handle_connection, std::move(socket), model.get(),
+                    server_opts, &is_generating)
+            .detach();
       } catch (const std::exception &e) {
-        spdlog::error("connection handling failed: {}", e.what());
+        spdlog::error("accept failed: {}", e.what());
       }
     }
   } catch (const std::exception &e) {
