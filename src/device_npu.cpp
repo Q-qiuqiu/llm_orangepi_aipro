@@ -1,4 +1,5 @@
 #include "acl/acl.h"
+#include <stdexcept>
 #include <spdlog/spdlog.h>
 
 #include "device.hpp"
@@ -24,6 +25,9 @@ void* NPUAllocator::Allocate(size_t size) {
 }
 
 void* NPUAllocator::AllocateImpl(size_t size) {
+    if (size == 0) {
+        throw std::invalid_argument("NPU allocation size must be greater than zero");
+    }
     void *dev_mem = nullptr;
     for (auto it = freelist.begin(); it != freelist.end();) {
         if (it->size >= size) {

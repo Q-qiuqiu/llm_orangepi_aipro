@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-BIN="./build_server/src/qwen_openai_server"
+BIN="./qwen_openai_server"
 if [ ! -x "${BIN}" ]; then
   echo "server binary not found: ${BIN}"
   echo "build it first: cmake -S . -B build_server && cmake --build build_server -j2"

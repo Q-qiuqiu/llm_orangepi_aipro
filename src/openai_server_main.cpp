@@ -7,6 +7,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <chrono>
+#include <cctype>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
@@ -16,6 +17,7 @@
 #include <csignal>
 #include <sstream>
 #include <spdlog/spdlog.h>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -307,6 +309,12 @@ static std::string get_last_user_prompt(const json &messages) {
   return prompt;
 }
 
+static bool is_blank_prompt(const std::string &prompt) {
+  return std::all_of(prompt.begin(), prompt.end(), [](unsigned char c) {
+    return std::isspace(c);
+  });
+}
+
 static std::string decode_completion(Qwen2Model *model,
                                      const std::vector<int> &output_ids,
                                      size_t prompt_token_count) {
@@ -348,6 +356,9 @@ static GenerationResult generate_text(Qwen2Model *model,
   ctx.npu_stream = model->model_stream;
   std::vector<int> input_ids =
       model->qwen_tokenizer.encode(prompt, model->config.max_seq_len);
+  if (input_ids.empty()) {
+    throw std::invalid_argument("prompt produced zero tokens");
+  }
 
   if (static_cast<int>(input_ids.size()) >= model->config.max_seq_len) {
     int keep_prompt_tokens = std::max(1, model->config.max_seq_len - 1);
@@ -424,6 +435,9 @@ static GenerationResult generate_text_stream(Qwen2Model *model,
   ctx.npu_stream = model->model_stream;
   std::vector<int> input_ids =
       model->qwen_tokenizer.encode(prompt, model->config.max_seq_len);
+  if (input_ids.empty()) {
+    throw std::invalid_argument("prompt produced zero tokens");
+  }
 
   if (static_cast<int>(input_ids.size()) >= model->config.max_seq_len) {
     int keep_prompt_tokens = std::max(1, model->config.max_seq_len - 1);
@@ -583,6 +597,12 @@ handle_request(Qwen2Model *model, const ServerOptions &opts,
           opts.use_chat_template
               ? build_qwen_chat_prompt(body["messages"], &user_prompt)
               : user_prompt;
+      if (is_blank_prompt(prompt)) {
+        return json_response(
+            http::status::bad_request,
+            {{"error", {{"message", "prompt must not be empty"}}}},
+            req.version(), req.keep_alive());
+      }
       spdlog::info("user prompt: {}", user_prompt);
       GenerationResult gen =
           generate_text(model, prompt, max_tokens, temperature, top_p);
@@ -602,6 +622,12 @@ handle_request(Qwen2Model *model, const ServerOptions &opts,
       std::string prompt;
       if (body.contains("prompt")) {
         prompt = json_content_to_text(body["prompt"]);
+      }
+      if (is_blank_prompt(prompt)) {
+        return json_response(
+            http::status::bad_request,
+            {{"error", {{"message", "prompt must not be empty"}}}},
+            req.version(), req.keep_alive());
       }
       spdlog::info("user prompt: {}", prompt);
       GenerationResult gen =

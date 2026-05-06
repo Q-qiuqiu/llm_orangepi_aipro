@@ -8,10 +8,12 @@ if [ ! -x "${BIN}" ]; then
   exit 1
 fi
 
+MODEL_DIR="/root/models/DeepSeek-R1-Distill-Qwen-1.5B_server"
+
 "${BIN}" \
---config=/root/models/DeepSeek-R1-Distill-Qwen-1.5B/config.json \
---tokenizer=/root/models/DeepSeek-R1-Distill-Qwen-1.5B/ \
---weight=/root/models/DeepSeek-R1-Distill-Qwen-1.5B_converted \
+--config="${MODEL_DIR}/config/config.json" \
+--tokenizer="${MODEL_DIR}/tokenizer/" \
+--weight="${MODEL_DIR}/converted" \
 --device_type=npu \
 --host=0.0.0.0 \
 --port=8081 \
